@@ -1,3 +1,92 @@
 #!/bin/bash
 
+set -euo pipefail
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
 command="${1:-help}"
+
+function commitSigner {
+	ref="${1:-HEAD}"
+	git verify-commit --raw "$ref" 2>&1 | grep VALIDSIG | cut -d' ' -f3
+}
+
+function localSigner {
+	gpg --list-keys | grep "$(git config --get user.signingkey)\$" | tr -d ' '
+}
+
+function getBalance {
+	key="${1:-$(localSigner)}"
+	echo 0
+}
+
+function join {
+	localkey="$(localSigner)"
+	key="${1:-$localkey}"
+	remote="${2:-$(git remote)}"
+	message="${3:-Invited $key}"
+
+	mkdir -p "$DIR/keys"
+	mkdir -p "$DIR/remotes"
+
+	if [[ "z$key" != "z$localkey" ]]; then
+		echo "Preparing to trust the following key:"
+		gpg --list-key "$key"
+		echo "Please press ctrl+C to cancel or press enter to trust the key."
+		read confirmation
+		echo "$key:5:" | gpg --import-ownertrust
+		gpg --sign-key "$key"
+	fi
+	gpg --export --armor "$key" > "$DIR/keys/$key"
+	echo "$remote" > "$DIR/remotes/$key"
+	git add "$DIR/keys/$key"
+	git add "$DIR/remotes/$key"
+	git commit -S -m "$message" 
+	git push -u origin
+}
+
+function findAccount {
+	gpg --list-key --with-colons "$1" | grep ^uid:
+}
+
+function transfer {
+	dest="$1"
+	amount="$2"
+	message="${3:-No transaction message}"
+
+	matches="$(findAccount "$dest")"
+	if [ "$(wc -l <<<"$matches")" -gt 1]; then
+		echo "Multiple matches found:" 1>&2
+		echo "$matches" 1>&2
+		echo "Please pick the right one and rerun the command with the full email address." 1>&2
+		exit 1
+	fi
+	if [ "z$matches" = "z" ]; then
+		echo "Key $dest not found." 1>&2
+		exit 1
+	fi
+
+	destkey="$(cut -d: -f8 <<<"$matches")"
+	localkey="$(localSigner)"
+	timestamp="$(date +%s)"
+
+	mkdir -p "$DIR/transactions"
+	transaction="$DIR/transactions/$timestamp_$localkey_$destkey"
+	echo "$amount" > "$transaction"
+
+	# TODO: sign key?
+
+	git add "$transaction"
+	git commit -S -m "$message"
+	git push
+}
+
+function verifyKeyFile {
+	set -euo pipefail
+
+	key="$1"
+	gpg --with-colons --import-options show-only --import "$DIR/keys/$key" | grep --silent "fpr:::::::::$key:"
+}
+
+#join D90C6F9822385F39DAEA02930781FFC5D26E591D https://github.com/thexa4/gitledger.git
+#transfer Derk-Jan 100
